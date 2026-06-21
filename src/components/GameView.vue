@@ -86,6 +86,21 @@
       @confirm="onStartProduction"
     />
 
+    <ResourceAssignModal
+      v-if="showResourceModal"
+      :current-stage="currentStage"
+      :available-members="availableMembers"
+      :current-quality="state.activeProduction.currentQuality"
+      @confirm="onAssignResources"
+    />
+
+    <ProductionEventModal
+      v-if="showEventModal"
+      :event="state.activeProduction.pendingEvent"
+      :current-quality="state.activeProduction.currentQuality"
+      @select="onResolveEvent"
+    />
+
     <div v-if="showReworkModal" class="modal-overlay" @click.self="">
       <div class="modal-content rework-modal">
         <div class="modal-header">
@@ -95,19 +110,34 @@
           <p>制作人对当前作品不满意，建议进行返工以提升品质。</p>
           <div class="rework-info">
             <div class="rework-item">
+              <span>当前品质</span>
+              <strong>{{ state.activeProduction?.currentQuality.toFixed(1) }}</strong>
+            </div>
+            <div class="rework-item">
               <span>返工费用</span>
               <strong>¥{{ reworkCost.toLocaleString() }}</strong>
             </div>
             <div class="rework-item">
               <span>预计品质提升</span>
-              <strong class="positive">+5% ~ +10%</strong>
+              <strong class="positive">+{{ potentialGain.toFixed(1) }} ~ +{{ (potentialGain * 2).toFixed(1) }}</strong>
             </div>
             <div class="rework-item">
               <span>已返工次数</span>
               <strong>{{ state.activeProduction?.reworkCount || 0 }} 次</strong>
             </div>
           </div>
-          <p class="rework-tip">返工后将重新经历制作流程（耗时约5天）。</p>
+          <div class="decision-summary">
+            <div class="summary-title">本次制作决策评价</div>
+            <div class="summary-stats">
+              <span class="good">优 {{ goodDecisions }}</span>
+              <span class="bad">劣 {{ badDecisions }}</span>
+              <span class="neutral">中 {{ neutralDecisions }}</span>
+            </div>
+            <div class="rework-chance">
+              返工风险系数：<strong>{{ Math.round(reworkChance * 100) }}%</strong>
+            </div>
+          </div>
+          <p class="rework-tip">返工后将重新经历制作流程，需要重新分配资源。</p>
         </div>
         <div class="modal-footer">
           <button class="btn secondary" @click="onSkipRework">
@@ -133,7 +163,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed } from 'vue'
 import GameHeader from './GameHeader.vue'
 import TraineeCard from './TraineeCard.vue'
 import SchedulePanel from './SchedulePanel.vue'
@@ -145,6 +175,8 @@ import RatingModal from './RatingModal.vue'
 import DebutModal from './DebutModal.vue'
 import EventModal from './EventModal.vue'
 import ProductionModal from './ProductionModal.vue'
+import ResourceAssignModal from './ResourceAssignModal.vue'
+import ProductionEventModal from './ProductionEventModal.vue'
 import GameOverModal from './GameOverModal.vue'
 import { GAME_CONFIG } from '../config/gameConfig'
 
@@ -162,6 +194,8 @@ const props = defineProps({
   startProduction: Function,
   confirmRework: Function,
   skipRework: Function,
+  assignResources: Function,
+  resolveEvent: Function,
 })
 
 const emit = defineEmits([
@@ -181,13 +215,69 @@ const showProduction = ref(false)
 const selectedGroup = ref(null)
 const toast = ref('')
 
+const showResourceModal = computed(() => {
+  return props.state?.activeProduction?.status === 'assigning_resources' &&
+         !props.state.activeProduction.pendingEvent &&
+         !props.state.activeProduction.reworkPending
+})
+
+const showEventModal = computed(() => {
+  return props.state?.activeProduction?.pendingEvent &&
+         !props.state.activeProduction.reworkPending
+})
+
 const showReworkModal = computed(() => {
   return props.state?.activeProduction?.reworkPending === true
+})
+
+const currentStage = computed(() => {
+  if (!props.state?.activeProduction) return null
+  return props.state.activeProduction.stages[props.state.activeProduction.currentStageIndex]
+})
+
+const availableMembers = computed(() => {
+  if (!props.state?.activeProduction) return []
+  const group = props.state.groups.find((g) => g.id === props.state.activeProduction.groupId)
+  if (!group) return []
+  return props.state.trainees.filter((t) => group.memberIds.includes(t.id))
 })
 
 const reworkCost = computed(() => {
   if (!props.state?.activeProduction) return 0
   return Math.round(props.state.activeProduction.totalCost * GAME_CONFIG.producers.rework.extraCostPercent)
+})
+
+const goodDecisions = computed(() => {
+  return props.state?.activeProduction?.eventHistory?.filter((e) => e.qualityEffect > 0.02).length || 0
+})
+
+const badDecisions = computed(() => {
+  return props.state?.activeProduction?.eventHistory?.filter((e) => e.qualityEffect < -0.02).length || 0
+})
+
+const neutralDecisions = computed(() => {
+  const total = props.state?.activeProduction?.eventHistory?.length || 0
+  return total - goodDecisions.value - badDecisions.value
+})
+
+const reworkChance = computed(() => {
+  if (!props.state?.activeProduction) return 0
+  let chance = GAME_CONFIG.producers.rework.baseThreshold
+  chance += (badDecisions.value - goodDecisions.value) * 0.1
+  chance -= (props.state.activeProduction.decisionScore || 0) * 0.05
+  const producer = props.state.activeProduction.producerId
+    ? props.state.producerSynergy[props.state.activeProduction.producerId]
+    : null
+  if (producer) {
+    chance += 0.15
+  }
+  return Math.max(0.05, Math.min(0.7, chance))
+})
+
+const potentialGain = computed(() => {
+  if (!props.state?.activeProduction) return 0
+  const qualityGap = 80 - props.state.activeProduction.currentQuality
+  return Math.max(5, qualityGap * 0.3)
 })
 
 function showToast(message, duration = 2500) {
@@ -229,7 +319,31 @@ function onStartProduction(producerId) {
   if (result?.success) {
     showProduction.value = false
     selectedGroup.value = null
-    showToast('开始制作单曲！')
+    showToast('开始制作单曲！请分配作曲资源。')
+  } else if (result?.message) {
+    showToast(result.message, 3000)
+  }
+}
+
+function onAssignResources(memberIds) {
+  const result = props.assignResources(memberIds)
+  if (result?.success) {
+    showToast(`资源分配完成！品质 +${result.qualityGain.toFixed(1)}`)
+  } else if (result?.message) {
+    showToast(result.message, 3000)
+  }
+}
+
+function onResolveEvent(choiceIndex) {
+  const result = props.resolveEvent(choiceIndex)
+  if (result?.success) {
+    const effects = result.effects
+    const qualityText = effects.qualityEffect > 0
+      ? `品质提升 ${Math.round(effects.qualityEffect * 100)}%`
+      : effects.qualityEffect < 0
+      ? `品质下降 ${Math.abs(Math.round(effects.qualityEffect * 100))}%`
+      : '品质不变'
+    showToast(`决策完成！${qualityText}`)
   } else if (result?.message) {
     showToast(result.message, 3000)
   }
@@ -238,7 +352,7 @@ function onStartProduction(producerId) {
 function onConfirmRework() {
   const result = props.confirmRework()
   if (result?.success) {
-    showToast('开始返工！')
+    showToast('开始返工！请重新分配作曲资源。')
   } else if (result?.message) {
     showToast(result.message, 3000)
   }
@@ -367,6 +481,60 @@ function onSkipRework() {
 
 .rework-item .positive {
   color: #10b981;
+}
+
+.decision-summary {
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.summary-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #92400e;
+  margin-bottom: 0.4rem;
+}
+
+.summary-stats {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.8rem;
+}
+
+.summary-stats .good {
+  background: rgba(16, 185, 129, 0.2);
+  color: #065f46;
+  padding: 0.1rem 0.5rem;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.summary-stats .bad {
+  background: rgba(239, 68, 68, 0.2);
+  color: #991b1b;
+  padding: 0.1rem 0.5rem;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.summary-stats .neutral {
+  background: rgba(107, 114, 128, 0.2);
+  color: #374151;
+  padding: 0.1rem 0.5rem;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.rework-chance {
+  font-size: 0.8rem;
+  color: #92400e;
+}
+
+.rework-chance strong {
+  color: #d97706;
 }
 
 .rework-tip {

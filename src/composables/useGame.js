@@ -17,6 +17,8 @@ import {
   confirmRework,
   skipRework,
   getQualityLevel,
+  assignStageResources,
+  resolveProductionEvent,
 } from '../utils/gameLogic'
 import { saveToSlot } from '../utils/storage'
 
@@ -164,6 +166,26 @@ export function useGame() {
     return getProducerSynergy(state.value, producerId)
   }
 
+  function handleAssignResources(memberIds) {
+    if (!state.value) return null
+    const result = assignStageResources(state.value, memberIds)
+    if (result.success) {
+      state.value = result.state
+      autoSave()
+    }
+    return result
+  }
+
+  function handleResolveEvent(choiceIndex) {
+    if (!state.value) return null
+    const result = resolveProductionEvent(state.value, choiceIndex)
+    if (result.success) {
+      state.value = result.state
+      autoSave()
+    }
+    return result
+  }
+
   return {
     state,
     currentSlot,
@@ -190,6 +212,8 @@ export function useGame() {
     handleStartProduction,
     handleConfirmRework,
     handleSkipRework,
+    handleAssignResources,
+    handleResolveEvent,
     getSynergy,
     getProducer,
     getQualityLevel,

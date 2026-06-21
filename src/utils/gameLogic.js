@@ -656,6 +656,9 @@ export function startProduction(state, groupId, producerId) {
     ...s,
     daysLeft: s.days,
     completed: false,
+    assignedMembers: [],
+    qualityContribution: 0,
+    eventResults: [],
   }))
 
   const baseQuality = calcBaseQuality(group, producer)
@@ -670,13 +673,21 @@ export function startProduction(state, groupId, producerId) {
     stages,
     currentStageIndex: 0,
     baseQuality: clamp(baseQuality * (1 + synergyBonus), 0, 100),
+    currentQuality: clamp(baseQuality * (1 + synergyBonus), 0, 100),
     finalQuality: 0,
     reworkCount: 0,
     totalCost: baseCost,
     startDay: state.day,
-    status: 'in_progress',
+    status: 'assigning_resources',
     reworkPending: false,
+    pendingEvent: null,
+    eventHistory: [],
+    decisionScore: 0,
+    totalDays: 0,
   }
+
+  const members = state.trainees.filter((t) => group.memberIds.includes(t.id))
+  const firstStage = stages[0]
 
   const newState = {
     ...state,
@@ -689,14 +700,269 @@ export function startProduction(state, groupId, producerId) {
         day: state.day,
         text: `🎼 ${group.name} 开始制作新单曲${producer ? `，制作人：${producer.name}` : ''}。`,
       },
+      {
+        day: state.day,
+        text: `📋 【${firstStage.label}】阶段需要 ${firstStage.requiredMembers} 名成员参与，请分配作曲资源。`,
+      },
     ],
   }
 
-  return { success: true, state: newState }
+  return { success: true, state: newState, members, stage: firstStage }
+}
+
+export function assignStageResources(state, memberIds) {
+  if (!state.activeProduction || state.activeProduction.status !== 'assigning_resources') {
+    return { success: false, message: '当前不需要分配资源' }
+  }
+
+  const production = { ...state.activeProduction }
+  const stages = production.stages.map((s) => ({ ...s }))
+  const currentStage = stages[production.currentStageIndex]
+
+  if (memberIds.length < currentStage.requiredMembers) {
+    return {
+      success: false,
+      message: `需要至少 ${currentStage.requiredMembers} 名成员参与`,
+    }
+  }
+
+  const group = state.groups.find((g) => g.id === production.groupId)
+  const assignedMembers = state.trainees.filter((t) => memberIds.includes(t.id))
+
+  let qualityBonus = 0
+  const matchDetails = []
+
+  for (const member of assignedMembers) {
+    let memberScore = 0
+
+    if (currentStage.primaryStat) {
+      memberScore += member[currentStage.primaryStat] * 0.6
+    }
+    if (currentStage.secondaryStat) {
+      memberScore += member[currentStage.secondaryStat] * 0.3
+    }
+    memberScore += (member.vocal + member.dance + member.rap + member.charm + member.variety) / 5 * 0.1
+
+    const matchBonus = memberScore * currentStage.statWeight * 0.008
+    qualityBonus += matchBonus
+
+    matchDetails.push({
+      name: member.name,
+      score: Math.round(memberScore),
+      contribution: Math.round(matchBonus * 100) / 100,
+    })
+  }
+
+  qualityBonus = qualityBonus / Math.max(1, memberIds.length)
+
+  currentStage.assignedMembers = memberIds
+  currentStage.qualityContribution = qualityBonus
+  production.currentQuality = clamp(production.currentQuality + qualityBonus, 0, 100)
+  production.status = 'in_progress'
+  production.stages = stages
+
+  const logs = [
+    ...state.logs,
+    {
+      day: state.day,
+      text: `👥 已分配成员参与【${currentStage.label}】：${assignedMembers.map((m) => m.name).join('、')}`,
+    },
+    {
+      day: state.day,
+      text: `📈 成员属性匹配贡献品质 +${(qualityBonus).toFixed(1)}，当前品质：${production.currentQuality.toFixed(1)}`,
+    },
+  ]
+
+  const trainees = state.trainees.map((t) => {
+    if (!memberIds.includes(t.id)) return t
+    return { ...t, fatigue: clamp((t.fatigue || 0) + 5, 0, 100) }
+  })
+
+  return {
+    success: true,
+    state: {
+      ...state,
+      activeProduction: production,
+      logs,
+      trainees,
+    },
+    qualityGain: qualityBonus,
+  }
+}
+
+export function triggerProductionEvent(state) {
+  if (!state.activeProduction || state.activeProduction.status !== 'in_progress') {
+    return null
+  }
+
+  if (state.activeProduction.pendingEvent) {
+    return null
+  }
+
+  if (Math.random() > CFG.producers.productionEvents.dailyChance) {
+    return null
+  }
+
+  const production = state.activeProduction
+  const currentStage = production.stages[production.currentStageIndex]
+  const stageKey = currentStage.key
+
+  const availableEvents = CFG.producers.productionEvents.types.filter(
+    (e) => e.stage.includes(stageKey)
+  )
+
+  if (availableEvents.length === 0) return null
+
+  const event = availableEvents[Math.floor(Math.random() * availableEvents.length)]
+
+  const assignedMembers = currentStage.assignedMembers
+    .map((id) => state.trainees.find((t) => t.id === id))
+    .filter(Boolean)
+
+  const eventInstance = {
+    ...event,
+    triggeredDay: state.day,
+    stageKey,
+    assignedMembers: assignedMembers.map((m) => ({ id: m.id, name: m.name })),
+  }
+
+  return {
+    event: eventInstance,
+    members: assignedMembers,
+  }
+}
+
+export function resolveProductionEvent(state, choiceIndex) {
+  if (!state.activeProduction || !state.activeProduction.pendingEvent) {
+    return { success: false, message: '没有待处理的制作事件' }
+  }
+
+  const production = { ...state.activeProduction }
+  const event = production.pendingEvent
+  const choice = event.choices[choiceIndex]
+
+  if (!choice) {
+    return { success: false, message: '无效的选择' }
+  }
+
+  const qualityEffect = randFloat(choice.qualityEffect[0], choice.qualityEffect[1])
+  const synergyEffect = randInt(choice.synergyEffect[0], choice.synergyEffect[1])
+  const stressEffect = randInt(choice.stressEffect[0], choice.stressEffect[1])
+  const fatigueEffect = choice.fatigueEffect ? randInt(choice.fatigueEffect[0], choice.fatigueEffect[1]) : 0
+  const fansEffect = choice.fansEffect ? randInt(choice.fansEffect[0], choice.fansEffect[1]) : 0
+  const extraCost = choice.extraCost ? randInt(choice.extraCost[0], choice.extraCost[1]) : 0
+  const extraDays = choice.extraDays || 0
+
+  production.currentQuality = clamp(production.currentQuality * (1 + qualityEffect), 0, 100)
+  production.decisionScore += qualityEffect > 0 ? 1 : qualityEffect < 0 ? -1 : 0
+
+  let producerSynergy = { ...state.producerSynergy }
+  if (production.producerId) {
+    const current = producerSynergy[production.producerId] || 0
+    producerSynergy[production.producerId] = clamp(current + synergyEffect, 0, CFG.producers.synergy.max)
+  }
+
+  const logs = [
+    ...state.logs,
+    {
+      day: state.day,
+      text: `⚡ 【${event.label}】${choice.resultText}`,
+    },
+  ]
+
+  const qualityText = qualityEffect > 0 ? `品质 +${Math.round(qualityEffect * 100)}%` :
+                      qualityEffect < 0 ? `品质 ${Math.round(qualityEffect * 100)}%` : '品质不变'
+  logs.push({
+    day: state.day,
+    text: `📊 结果：${qualityText}，当前品质：${production.currentQuality.toFixed(1)}`,
+  })
+
+  if (synergyEffect !== 0) {
+    logs.push({
+      day: state.day,
+      text: `🤝 与制作人磨合度 ${synergyEffect > 0 ? '+' : ''}${synergyEffect}`,
+    })
+  }
+
+  const currentStage = production.stages[production.currentStageIndex]
+  const eventAssignedIds = event.assignedMembers.map((m) => m.id)
+
+  const trainees = state.trainees.map((t) => {
+    if (!eventAssignedIds.includes(t.id)) return t
+    return {
+      ...t,
+      stress: clamp((t.stress || 0) + stressEffect, 0, 100),
+      fatigue: clamp((t.fatigue || 0) + fatigueEffect, 0, 100),
+      fans: (t.fans || 0) + (fansEffect > 0 ? Math.round(fansEffect / eventAssignedIds.length) : 0),
+    }
+  })
+
+  production.eventHistory.push({
+    eventId: event.id,
+    choiceIndex,
+    qualityEffect,
+    synergyEffect,
+    stressEffect,
+    fatigueEffect,
+    fansEffect,
+    day: state.day,
+    stageKey: event.stageKey,
+  })
+
+  if (extraDays > 0) {
+    currentStage.daysLeft += extraDays
+    logs.push({
+      day: state.day,
+      text: `⏰ 制作进度延迟 ${extraDays} 天`,
+    })
+  }
+
+  production.pendingEvent = null
+  production.totalCost += extraCost
+  production.stages = production.stages.map((s, i) =>
+    i === production.currentStageIndex ? currentStage : s
+  )
+
+  let newState = {
+    ...state,
+    activeProduction: production,
+    logs,
+    trainees,
+    producerSynergy,
+    money: state.money - extraCost,
+    totalExpenses: state.totalExpenses + extraCost,
+    fans: state.fans + fansEffect,
+  }
+
+  if (extraDays > 0) {
+    newState.activeProduction = { ...production }
+  }
+
+  return {
+    success: true,
+    state: newState,
+    effects: {
+      qualityEffect,
+      synergyEffect,
+      stressEffect,
+      fatigueEffect,
+      fansEffect,
+      extraCost,
+      extraDays,
+    },
+  }
 }
 
 export function processProductionDay(state) {
-  if (!state.activeProduction || state.activeProduction.status !== 'in_progress') {
+  if (!state.activeProduction) {
+    return state
+  }
+
+  if (state.activeProduction.status !== 'in_progress') {
+    return state
+  }
+
+  if (state.activeProduction.pendingEvent) {
     return state
   }
 
@@ -708,16 +974,45 @@ export function processProductionDay(state) {
     return { ...state, logs }
   }
 
+  production.totalDays += 1
+
   const currentStage = stages[production.currentStageIndex]
   if (currentStage && !currentStage.completed) {
     currentStage.daysLeft -= 1
+
     if (currentStage.daysLeft <= 0) {
       currentStage.completed = true
       logs.push({
         day: state.day,
         text: `🎹 单曲制作「${currentStage.label}」阶段完成。`,
       })
+
+      const avgContribution = stages.slice(0, production.currentStageIndex + 1)
+        .reduce((s, st) => s + st.qualityContribution, 0) / (production.currentStageIndex + 1)
+      logs.push({
+        day: state.day,
+        text: `✨ 阶段品质贡献：${currentStage.qualityContribution.toFixed(1)}，累计平均：${avgContribution.toFixed(1)}`,
+      })
+
       production.currentStageIndex += 1
+
+      if (production.currentStageIndex < stages.length) {
+        const nextStage = stages[production.currentStageIndex]
+        if (nextStage.requiredMembers > 0) {
+          production.status = 'assigning_resources'
+          logs.push({
+            day: state.day,
+            text: `📋 【${nextStage.label}】阶段需要 ${nextStage.requiredMembers} 名成员参与，请分配作曲资源。`,
+          })
+        }
+      }
+    } else {
+      const dailyDecay = 0.001
+      const assignedCount = currentStage.assignedMembers?.length || 0
+      if (assignedCount > 0) {
+        const dailyGain = (currentStage.qualityContribution / currentStage.days) * (1 - dailyDecay * currentStage.daysLeft)
+        production.currentQuality = clamp(production.currentQuality + dailyGain * 0.2, 0, 100)
+      }
     }
   }
 
@@ -725,27 +1020,71 @@ export function processProductionDay(state) {
 
   if (allStagesDone && !production.reworkPending) {
     const producer = production.producerId ? getProducer(production.producerId) : null
-    const reworkChance = producer ? producer.reworkRisk : 0.35
+
+    let reworkChance = CFG.producers.rework.baseThreshold
+
+    const goodDecisions = production.eventHistory.filter((e) => e.qualityEffect > 0.02).length
+    const badDecisions = production.eventHistory.filter((e) => e.qualityEffect < -0.02).length
+    reworkChance += (badDecisions - goodDecisions) * 0.1
+
+    reworkChance -= production.decisionScore * 0.05
+
+    if (producer) {
+      reworkChance += producer.reworkRisk * 0.5
+    }
+
+    const avgQualityContribution = stages.reduce((s, st) => s + st.qualityContribution, 0) / stages.length
+    reworkChance -= avgQualityContribution * 0.005
+
+    reworkChance = clamp(reworkChance, 0.05, 0.7)
 
     if (Math.random() < reworkChance && production.reworkCount < 2) {
       production.reworkPending = true
       production.reworkCount += 1
+
+      const qualityGap = 80 - production.currentQuality
+      const potentialGain = Math.max(5, qualityGap * 0.3)
+
       logs.push({
         day: state.day,
         text: `⚠️ 单曲制作完成，但制作人不满意，需要返工！`,
       })
+      logs.push({
+        day: state.day,
+        text: `💡 当前品质：${production.currentQuality.toFixed(1)}，返工有望提升约 ${potentialGain.toFixed(1)} 点品质。`,
+      })
+      logs.push({
+        day: state.day,
+        text: `📊 决策评价：${goodDecisions}次优 / ${badDecisions}次劣 / ${production.eventHistory.length - goodDecisions - badDecisions}次中性`,
+      })
     } else {
+      production.finalQuality = production.currentQuality
       return finalizeProduction({ ...state, activeProduction: production, logs })
     }
   }
 
   production.stages = stages
 
-  return {
+  let newState = {
     ...state,
     activeProduction: production,
     logs,
   }
+
+  if (production.status === 'in_progress' && !production.pendingEvent) {
+    const eventResult = triggerProductionEvent(newState)
+    if (eventResult) {
+      newState = {
+        ...newState,
+        activeProduction: {
+          ...newState.activeProduction,
+          pendingEvent: eventResult.event,
+        },
+      }
+    }
+  }
+
+  return newState
 }
 
 export function confirmRework(state) {
@@ -764,6 +1103,9 @@ export function confirmRework(state) {
     ...s,
     daysLeft: Math.ceil(s.days * 0.5),
     completed: false,
+    assignedMembers: [],
+    qualityContribution: 0,
+    eventResults: [],
   }))
 
   const qualityGain = randFloat(CFG.producers.rework.qualityGain[0], CFG.producers.rework.qualityGain[1])
@@ -771,16 +1113,26 @@ export function confirmRework(state) {
   production.stages = stages
   production.currentStageIndex = 0
   production.reworkPending = false
-  production.baseQuality = clamp(production.baseQuality * (1 + qualityGain), 0, 100)
+  production.currentQuality = clamp(production.currentQuality * (1 + qualityGain), 0, 100)
+  production.baseQuality = production.currentQuality
   production.totalCost += reworkCost
+  production.status = 'assigning_resources'
 
+  const firstStage = stages[0]
   const logs = [
     ...state.logs,
     {
       day: state.day,
-      text: `🔧 开始返工，追加投入 ¥${reworkCost.toLocaleString()}，品质有望提升。`,
+      text: `🔧 开始返工，追加投入 ¥${reworkCost.toLocaleString()}，基础品质提升至 ${production.currentQuality.toFixed(1)}。`,
     },
   ]
+
+  if (firstStage.requiredMembers > 0) {
+    logs.push({
+      day: state.day,
+      text: `📋 返工【${firstStage.label}】阶段需要 ${firstStage.requiredMembers} 名成员参与，请重新分配作曲资源。`,
+    })
+  }
 
   return {
     success: true,
@@ -801,10 +1153,20 @@ export function skipRework(state) {
 
   const production = { ...state.activeProduction }
   production.reworkPending = false
+  production.finalQuality = production.currentQuality
+
+  const logs = [
+    ...state.logs,
+    {
+      day: state.day,
+      text: `📤 你选择跳过返工，直接发行当前版本。`,
+    },
+  ]
 
   return finalizeProduction({
     ...state,
     activeProduction: production,
+    logs,
   })
 }
 
@@ -813,7 +1175,7 @@ function finalizeProduction(state) {
   const group = state.groups.find((g) => g.id === production.groupId)
   if (!group) return state
 
-  const quality = production.baseQuality
+  const quality = production.finalQuality || production.currentQuality
   const qualityLevel = getQualityLevel(quality)
 
   const members = state.trainees.filter((t) => group.memberIds.includes(t.id))
@@ -828,6 +1190,10 @@ function finalizeProduction(state) {
   const sales = Math.round(baseSales * qualityLevel.salesMult + randInt(-150, 300))
   const revenue = sales * CFG.single.revenuePerSale
   const fansGain = Math.round(sales * 0.02 * qualityLevel.fansMult)
+
+  const goodDecisions = production.eventHistory?.filter((e) => e.qualityEffect > 0.02).length || 0
+  const badDecisions = production.eventHistory?.filter((e) => e.qualityEffect < -0.02).length || 0
+  const totalEvents = production.eventHistory?.length || 0
 
   const groups = state.groups.map((g) => {
     if (g.id !== group.id) return g
@@ -844,6 +1210,12 @@ function finalizeProduction(state) {
           quality: quality,
           qualityLevel: qualityLevel.key,
           producerName: production.producerName,
+          totalCost: production.totalCost,
+          productionDays: production.totalDays,
+          reworkCount: production.reworkCount,
+          goodDecisions,
+          badDecisions,
+          totalEvents,
         },
       ],
     }
@@ -861,9 +1233,12 @@ function finalizeProduction(state) {
   let producerSynergy = { ...state.producerSynergy }
   if (production.producerId) {
     const current = producerSynergy[production.producerId] || 0
-    const gain = randInt(CFG.producers.synergy.perCollaboration[0], CFG.producers.synergy.perCollaboration[1])
+    const eventBonus = production.eventHistory?.length > 0
+      ? randInt(CFG.producers.synergy.eventBonus[0], CFG.producers.synergy.eventBonus[1])
+      : 0
+    const baseGain = randInt(CFG.producers.synergy.perCollaboration[0], CFG.producers.synergy.perCollaboration[1])
     producerSynergy[production.producerId] = clamp(
-      current + gain,
+      current + baseGain + eventBonus,
       0,
       CFG.producers.synergy.max
     )
@@ -873,7 +1248,15 @@ function finalizeProduction(state) {
     ...state.logs,
     {
       day: state.day,
-      text: `💿 ${group.name} 发行新单曲【${qualityLevel.label}】，销量 ${sales.toLocaleString()}，收入 ¥${revenue.toLocaleString()}，粉丝 +${fansGain}！`,
+      text: `🎉 单曲制作完成！耗时 ${production.totalDays} 天，总投入 ¥${production.totalCost.toLocaleString()}`,
+    },
+    {
+      day: state.day,
+      text: `📊 制作评价：${goodDecisions}次优决策 / ${badDecisions}次劣决策 / ${totalEvents - goodDecisions - badDecisions}次中性`,
+    },
+    {
+      day: state.day,
+      text: `💿 ${group.name} 发行新单曲【${qualityLevel.label}】，品质 ${quality.toFixed(1)}，销量 ${sales.toLocaleString()}，收入 ¥${revenue.toLocaleString()}，粉丝 +${fansGain}！`,
     },
   ]
 

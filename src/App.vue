@@ -23,6 +23,8 @@
     :start-production="handleStartProduction"
     :confirm-rework="handleConfirmRework"
     :skip-rework="handleSkipRework"
+    :assign-resources="handleAssignResources"
+    :resolve-event="handleResolveEvent"
     @back="backToMenu"
     @toggle-theme="toggleTheme"
     @set-schedule="setSchedule"
@@ -69,6 +71,8 @@ const {
   handleStartProduction,
   handleConfirmRework,
   handleSkipRework,
+  handleAssignResources,
+  handleResolveEvent,
   getSynergy,
 } = useGame()
 
