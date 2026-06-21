@@ -10,6 +10,13 @@ import {
   calcProfit,
   calcTraineeScore,
   getRelationship,
+  hireProducer,
+  getProducer,
+  getProducerSynergy,
+  startProduction,
+  confirmRework,
+  skipRework,
+  getQualityLevel,
 } from '../utils/gameLogic'
 import { saveToSlot } from '../utils/storage'
 
@@ -112,6 +119,51 @@ export function useGame() {
     return getRelationship(state.value.relationships, idA, idB)
   }
 
+  function handleHireProducer(producerId) {
+    if (!state.value) return null
+    const result = hireProducer(state.value, producerId)
+    if (result.success) {
+      state.value = result.state
+      autoSave()
+    }
+    return result
+  }
+
+  function handleStartProduction(groupId, producerId) {
+    if (!state.value) return null
+    const result = startProduction(state.value, groupId, producerId)
+    if (result.success) {
+      state.value = result.state
+      autoSave()
+    }
+    return result
+  }
+
+  function handleConfirmRework() {
+    if (!state.value) return null
+    const result = confirmRework(state.value)
+    if (result.success) {
+      state.value = result.state
+      autoSave()
+    }
+    return result
+  }
+
+  function handleSkipRework() {
+    if (!state.value) return null
+    const result = skipRework(state.value)
+    if (result.success) {
+      state.value = result.state
+      autoSave()
+    }
+    return result
+  }
+
+  function getSynergy(producerId) {
+    if (!state.value) return 0
+    return getProducerSynergy(state.value, producerId)
+  }
+
   return {
     state,
     currentSlot,
@@ -134,5 +186,12 @@ export function useGame() {
     getRatingResults: () => (state.value ? getRatingResults(state.value) : []),
     calcTraineeScore,
     autoSave,
+    handleHireProducer,
+    handleStartProduction,
+    handleConfirmRework,
+    handleSkipRework,
+    getSynergy,
+    getProducer,
+    getQualityLevel,
   }
 }

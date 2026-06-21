@@ -18,6 +18,11 @@
     :can-end-day="canEndDay()"
     :rating-results="getRatingResults()"
     :calc-score="calcTraineeScore"
+    :get-synergy="getSynergy"
+    :hire-producer="handleHireProducer"
+    :start-production="handleStartProduction"
+    :confirm-rework="handleConfirmRework"
+    :skip-rework="handleSkipRework"
     @back="backToMenu"
     @toggle-theme="toggleTheme"
     @set-schedule="setSchedule"
@@ -60,6 +65,11 @@ const {
   backToMenu,
   getRatingResults,
   calcTraineeScore,
+  handleHireProducer,
+  handleStartProduction,
+  handleConfirmRework,
+  handleSkipRework,
+  getSynergy,
 } = useGame()
 
 onMounted(() => {

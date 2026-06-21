@@ -14,13 +14,32 @@
         <span>总销量 {{ group.totalSales.toLocaleString() }}</span>
         <span>{{ group.singles.length }} 张单曲</span>
       </div>
-      <button
-        class="btn primary sm"
-        :disabled="money < singleCost"
-        @click="$emit('release', group.id)"
-      >
-        发行单曲 (¥{{ singleCost.toLocaleString() }})
-      </button>
+      <div v-if="group.singles.length > 0" class="recent-singles">
+        <div class="singles-label">最近单曲</div>
+        <div v-for="single in group.singles.slice(-2).reverse()" :key="single.day" class="single-item">
+          <span class="single-title">{{ single.title }}</span>
+          <span v-if="single.qualityLevel" class="quality-badge" :class="'q-' + single.qualityLevel">
+            {{ single.qualityLevel }}
+          </span>
+          <span class="single-sales">{{ single.sales.toLocaleString() }}销量</span>
+        </div>
+      </div>
+      <div class="action-buttons">
+        <button
+          class="btn secondary sm"
+          :disabled="money < singleCost"
+          @click="$emit('release', group.id)"
+        >
+          快速发行
+        </button>
+        <button
+          class="btn primary sm"
+          :disabled="hasActiveProduction"
+          @click="$emit('produce', group.id)"
+        >
+          制作人制作
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -32,9 +51,10 @@ const props = defineProps({
   groups: Array,
   trainees: Array,
   money: Number,
+  hasActiveProduction: Boolean,
 })
 
-defineEmits(['release'])
+defineEmits(['release', 'produce'])
 
 const singleCost = GAME_CONFIG.single.creationCost
 
@@ -83,5 +103,54 @@ function memberNames(group) {
   font-size: 0.8rem;
   color: var(--text-muted);
   margin-bottom: 0.5rem;
+}
+
+.recent-singles {
+  margin-bottom: 0.5rem;
+}
+
+.singles-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 0.3rem;
+}
+
+.single-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  padding: 0.2rem 0;
+}
+
+.single-title {
+  color: var(--text-secondary);
+}
+
+.quality-badge {
+  font-weight: 600;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+}
+
+.quality-badge.q-S { background: #fef3c7; color: #d97706; }
+.quality-badge.q-A { background: #f3e8ff; color: #9333ea; }
+.quality-badge.q-B { background: #dbeafe; color: #2563eb; }
+.quality-badge.q-C { background: #d1fae5; color: #059669; }
+.quality-badge.q-D { background: #f3f4f6; color: #6b7280; }
+
+.single-sales {
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.action-buttons .btn {
+  flex: 1;
 }
 </style>
